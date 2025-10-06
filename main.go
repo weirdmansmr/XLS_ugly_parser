@@ -11,6 +11,13 @@ import (
 	"github.com/xuri/excelize/v2"
 )
 
+type Student struct {
+	ID    int     `json:"id"`
+	Group string  `json:"group"`
+	Name  string  `json:"name"`
+	GPA   float64 `json:"gpa"`
+}
+
 func processRow(rowHtml *goquery.Selection, startRow int, sheetName string, f *excelize.File, filePath string, startRowMap map[string]int) map[string]int {
 	var sums [4]float64
 	var values [4]float64
@@ -62,10 +69,13 @@ func processRow(rowHtml *goquery.Selection, startRow int, sheetName string, f *e
 	
 	onlyDFilled := values[1] > 0 && values[0] == 0 && values[2] == 0 && values[3] == 0
 	
-	if onlyDFilled {
+	avgGradeInIgnoreRange := avgGrade >= 3.9 && avgGrade <= 4.1
+	
+	if onlyDFilled || avgGradeInIgnoreRange {
 		finalGrade = 0
-	} else if avgGrade > 0 {
-		finalGrade = totalSum / avgGrade
+	} else if avgGrade > 0 && (7-avgGrade) > 0 {
+		finalGrade = totalSum / (7 - avgGrade)
+		finalGrade = float64(int(finalGrade*100+0.5)) / 100
 	}
 	
 	f.SetCellValue(sheetName, fmt.Sprintf("O%d", startRow), finalGrade)
@@ -112,6 +122,75 @@ func getGroupNumber(filePath string) (string, error) {
 	}
 
 	return filePath[index+1 : index+3], nil
+}
+
+func getTop10Students(f *excelize.File, sheetName string) []Student {
+	rows, err := f.GetRows(sheetName)
+	if err != nil || len(rows) <= 1 {
+		return []Student{}
+	}
+
+	students := []Student{}
+	
+	maxRows := 11
+	if len(rows) < maxRows {
+		maxRows = len(rows)
+	}
+
+	for i := 1; i < maxRows; i++ {
+		row := rows[i]
+		if len(row) < 15 {
+			continue
+		}
+
+		name := ""
+		if len(row) > 1 {
+			name = row[1]
+		}
+
+		group := ""
+		if len(row) > 6 {
+			group = row[6]
+		}
+
+		gpa := 0.0
+		if len(row) > 14 {
+			if val, err := strconv.ParseFloat(row[14], 64); err == nil {
+				gpa = val
+			}
+		}
+
+		if gpa > 0 && name != "" && group != "" {
+			students = append(students, Student{
+				ID:    len(students),
+				Group: group,
+				Name:  name,
+				GPA:   gpa,
+			})
+		}
+
+		if len(students) >= 10 {
+			break
+		}
+	}
+
+	return students
+}
+
+func exportTop10ToJS(students []Student, courseName string) string {
+	result := fmt.Sprintf("const %s = [\n", courseName)
+	
+	for _, student := range students {
+		result += fmt.Sprintf("  {\n")
+		result += fmt.Sprintf("    id: %d,\n", student.ID)
+		result += fmt.Sprintf("    group: \"%s\",\n", student.Group)
+		result += fmt.Sprintf("    name: \"%s\",\n", student.Name)
+		result += fmt.Sprintf("    gpa: %.2f,\n", student.GPA)
+		result += fmt.Sprintf("  },\n")
+	}
+	
+	result += "];\n"
+	return result
 }
 
 func sortSheetByColumn(f *excelize.File, sheetName string, lastRow int) {
@@ -234,6 +313,7 @@ func main() {
 		"СР1.24-21.xls",
 		"СР1.24-22.xls",
 		"СР1.25-11.xls",
+		"СР1.25-12.xls",
 		"Э1.23-31.xls",
 		"Э1.23-32.xls",
 		"Э1.24-21.xls",
@@ -279,5 +359,30 @@ func main() {
 	sheets := []string{"Сводка", "4 курс", "3 курс", "2 курс", "1 курс"}
 	for _, sheet := range sheets {
 		sortSheetByColumn(f, sheet, startRowMap[sheet])
+	}
+
+	// Создаем файл с топ-10 студентов для каждого курса
+	jsOutput := "// Топ-10 студентов по курсам\n\n"
+	
+	courseNames := map[string]string{
+		"1 курс": "course1",
+		"2 курс": "course2",
+		"3 курс": "course3",
+		"4 курс": "course4",
+		"Сводка": "courseSummary",
+	}
+
+	for _, sheet := range sheets {
+		top10 := getTop10Students(f, sheet)
+		jsOutput += exportTop10ToJS(top10, courseNames[sheet])
+		jsOutput += "\n"
+	}
+
+	// Сохраняем результат в файл
+	err := os.WriteFile("top10.js", []byte(jsOutput), 0644)
+	if err != nil {
+		log.Printf("Ошибка сохранения файла top10.js: %v", err)
+	} else {
+		log.Println("Файл top10.js успешно создан")
 	}
 }
